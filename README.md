@@ -1,6 +1,6 @@
 # SPINN augmented with Lifted Matrix-Space model
 
-This repository contains the source code based on the paper [The Lifted-Matrix Space Model for Semantic Composition][1]. The Lifted-Matrix Space (LMS) model was implemented on top of the [SPINN Python Codebase][2]
+This repository contains the source code based on the paper [The Lifted-Matrix Space Model for Semantic Composition][1]. The Lifted Matrix-Space (LMS) model was implemented on top of the [SPINN Python Codebase][2].
 
 
 The included implementations are:
