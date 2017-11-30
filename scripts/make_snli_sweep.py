@@ -10,7 +10,7 @@ import sys
 
 NYU_NON_PBS = False
 NAME = "ENC"
-SWEEP_RUNS = 6
+SWEEP_RUNS = 8
 
 LIN = "LIN"
 EXP = "EXP"
@@ -36,7 +36,7 @@ FLAGS(sys.argv)
 
 FIXED_PARAMETERS = {
     "data_type":     "snli",
-    "model_type":      "CSPINN_LSTM",
+    "model_type":      "CSPINN",
     "training_data_path":    FLAGS.training_data_path,
     "eval_data_path":    FLAGS.eval_data_path,
     "embedding_data_path": FLAGS.embedding_data_path,
@@ -44,24 +44,22 @@ FIXED_PARAMETERS = {
     "metrics_path": FLAGS.log_path,
     "ckpt_path":  FLAGS.log_path,
     "word_embedding_dim":   "300",
-    "seq_length":   "150",
+    "seq_length":   "200",
     "eval_seq_length":  "150",
     "eval_interval_steps": "100",
     "statistics_interval_steps": "100",
-    "batch_size":  "32",
+    "batch_size":  "64",
     "num_mlp_layers": "2",
-    "transition_weight": "1.0",
+    "model_dim": "18",
 }
 
 # Tunable parameters.
 SWEEP_PARAMETERS = {
-    "learning_rate":      ("lr", EXP, 0.001, 0.002),  # RNN likes higher, but below 009.
-    "l2_lambda":          ("l2", EXP, 8e-7, 2e-5),
-    "semantic_classifier_keep_rate": ("skr", LIN, 0.7, 0.95),  # NB: Keep rates may depend considerably on dims.
-    "embedding_keep_rate": ("ekr", LIN, 0.7, 0.95),
-    "learning_rate_decay_per_10k_steps": ("dec", EXP, 0.5, 1.0),
-    "rl_weight":  ("rlwt", EXP, 0.00001, 0.01),
-    "model_dim":   ("md", LIN, 100, 300),
+    "learning_rate":      ("lr", EXP, 0.0001, 0.001),  # RNN likes higher, but below 009.
+    "l2_lambda":          ("l2", EXP, 1e-6, 1e-5),
+    "semantic_classifier_keep_rate": ("skr", LIN, 0.75, 0.85),  # NB: Keep rates may depend considerably on dims.
+    "embedding_keep_rate": ("ekr", LIN, 0.75, 0.85),
+    "learning_rate_decay_per_10k_steps": ("dec", EXP, 0.7, 0.9),
 }
 
 sweep_name = "sweep_" + NAME + "_" + \
