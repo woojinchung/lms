@@ -552,46 +552,27 @@ def Linear(initializer=DefaultUniformInitializer, bias_initializer=ZeroInitializ
     return CustomLinear
 
 
-class EmbedTensor(nn.Module):
-    def __init__(self, size, vocab_size, vectors):
-        super(EmbedTensor, self).__init__()
-
-        if vectors is None:
-            self.embed = nn.Embedding(vocab_size, size)
-            self.projection = Lift(size, size)
-        else:
-            self.projection = Lift(vectors.shape[1], size * size)
-
-        self.vectors = vectors
-
-    def forward(self, tokens):
-        if self.vectors is None:
-            embeds = self.embed(tokens.contiguous().view(-1).long())
-            embeds = to_gpu(embeds)
-        else:
-            embeds = self.vectors.take(tokens.data.cpu().numpy().ravel(), axis=0)
-            embeds = to_gpu(Variable(torch.from_numpy(embeds), volatile=tokens.volatile))
-        
-        if hasattr(self, 'projection'):
-            embeds = self.projection(embeds)
-
-        return embeds
-
-
 class Lift(nn.Module):
     def __init__(self, in_features, out_features, initializer=HeNormalInitializer, bias_initializer=OneInitializer):
         super(Lift, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.lift = Linear(initializer=HeNormalInitializer)(self.in_features, self.out_features * 2)
+        self.lift_c = Linear(initializer=HeNormalInitializer)(self.in_features, self.out_features)
+        self.lift_h = Linear(initializer=HeNormalInitializer)(self.in_features, self.out_features)
+        self.map_c = Linear(initializer=HeNormalInitializer)(self.out_features, self.out_features)
+        self.map_h = Linear(initializer=HeNormalInitializer)(self.out_features, self.out_features)
 
     def reset_parameters(self, initializer, bias_initializer):
         initializer(self.weight, 1.0 / np.sqrt(2))
         bias_initializer(self.bias)
 
     def forward(self, input):
-        tmp = self.lift(input)
-        return F.tanh(tmp)
+        c1 = F.tanh(self.lift_c(input))
+        h1 = F.tanh(self.lift_h(input))
+        c2 = F.tanh(self.map_c(c1))
+        h2 = F.tanh(self.map_h(h1))
+
+        return torch.cat((c1, h1, c2, h2), 1)
 
 
 def treelstmtensor(c_left, c_right, gates, cell_inp, use_dropout=False, training=None):
@@ -629,39 +610,89 @@ class ReduceTensor(nn.Module):
         assert size is not None
 
         self.dim = size
-        self.weight = Parameter(torch.Tensor(self.dim, self.dim))
-        self.b1 = Parameter(torch.Tensor(self.dim, self.dim))
-        self.b2 = Parameter(torch.Tensor(self.dim, self.dim))
 
-        self.left = Linear(initializer=HeKaimingInitializer)(self.dim * self.dim, 4 * (self.dim * self.dim))
-        self.right = Linear(initializer=HeKaimingInitializer)(self.dim * self.dim, 4 * (self.dim * self.dim))
+        # First layer
+        self.weight1 = Parameter(torch.Tensor(self.dim, self.dim))
+        self.b11 = Parameter(torch.Tensor(self.dim, self.dim))
+        self.b12 = Parameter(torch.Tensor(self.dim, self.dim))
+
+        self.left1 = Linear(initializer=HeKaimingInitializer)(self.dim * self.dim, 4 * (self.dim * self.dim))
+        self.right1 = Linear(initializer=HeKaimingInitializer)(self.dim * self.dim, 4 * (self.dim * self.dim))
+
+        # Linear layer for deep RNN
+        self.map_h = Linear(initializer=HeKaimingInitializer)(self.dim * self.dim, self.dim * self.dim) 
+
+        # Second layer
+        self.weight2 = Parameter(torch.Tensor(self.dim, self.dim))
+        self.b21 = Parameter(torch.Tensor(self.dim, self.dim))
+        self.b22 = Parameter(torch.Tensor(self.dim, self.dim))
+        self.b23 = Parameter(torch.Tensor(self.dim, self.dim))
+
+        self.left2 = Linear(initializer=HeKaimingInitializer)(self.dim * self.dim, 4 * (self.dim * self.dim))
+        self.right2 = Linear(initializer=HeKaimingInitializer)(self.dim * self.dim, 4 * (self.dim * self.dim))
 
         self.reset_parameters(initializer, bias_initializer)
         
     def reset_parameters(self, initializer, bias_initializer):
-        initializer(self.weight, 1.0 / np.sqrt(2))
-        bias_initializer(self.b1)
-        bias_initializer(self.b2)
+        initializer(self.weight1, 1.0 / np.sqrt(2))
+        bias_initializer(self.b11)
+        bias_initializer(self.b12)
+
+        initializer(self.weight2, 1.0 / np.sqrt(2))
+        bias_initializer(self.b21)
+        bias_initializer(self.b22)
+        bias_initializer(self.b23)
 
     def forward(self, left_in, right_in, tracking=None):
-        left, right = bundle(left_in), bundle(right_in)
-        lstm_gates = self.left(left.h)
-        lstm_gates += self.right(right.h)
-
-        # Core composition
-        # Retrieve hidden state from left_in and feed it into weight matrix
-        cell_inp = []
         hidden_dim = self.dim * self.dim
+        left1 = []
+        left2 = []
+        right1 = []
+        right2 = []
+
+        for l, r in zip(left_in, right_in):
+            ll = torch.chunk(l, 2, 1)
+            left1.append(ll[0])
+            left2.append(ll[1])
+            rr = torch.chunk(r, 2, 1)
+            right1.append(rr[0])
+            right2.append(rr[1])
+
+        # First layer
+        left, right = bundle(left1), bundle(right1)
+        lstm_gates = self.left1(left.h)
+        lstm_gates += self.right1(right.h)
 
         h = left.h.contiguous().view(-1, self.dim, self.dim)
-        cell_inp = torch.matmul(self.weight, h)
-        cell_inp = F.tanh(torch.add(cell_inp, self.b1))
+        cell_inp = torch.matmul(self.weight1, h)
+        cell_inp = F.tanh(torch.add(cell_inp, self.b11))
 
-        # Retrieve hidden state from right_in
         h = right.h.contiguous().view(-1, self.dim, self.dim)
-        cell_inp = F.tanh(torch.baddbmm(self.b2, cell_inp, h))
+        cell_inp = F.tanh(torch.baddbmm(self.b12, cell_inp, h))
         cell_inp = cell_inp.view(-1, hidden_dim)
 
-        out = unbundle(treelstmtensor(left.c, right.c, lstm_gates, cell_inp, training=self.training))
+        c1, h1 = treelstmtensor(left.c, right.c, lstm_gates, cell_inp, training=self.training)
+
+        # Second layer
+        left, right = bundle(left2), bundle(right2)
+        lstm_gates = self.left2(left.h)
+        lstm_gates += self.right2(right.h)
+
+        h = left.h.contiguous().view(-1, self.dim, self.dim)
+        cell_inp = torch.matmul(self.weight2, h)
+        cell_inp = F.tanh(torch.add(cell_inp, self.b21))
+
+        h = right.h.contiguous().view(-1, self.dim, self.dim)
+        cell_inp = F.tanh(torch.baddbmm(self.b22, cell_inp, h))
+
+        h = F.tanh(self.map_h(h1))
+        h = h.view(-1, self.dim, self.dim)
+        cell_inp = F.tanh(torch.baddbmm(self.b23, cell_inp, h))
+
+        cell_inp = cell_inp.view(-1, hidden_dim)
+        c2, h2 = treelstmtensor(left.c, right.c, lstm_gates, cell_inp, training=self.training)
+
+        out = torch.cat((c1, h1, c2, h2), 1)
+        out = torch.split(out, 1, 0)
 
         return out

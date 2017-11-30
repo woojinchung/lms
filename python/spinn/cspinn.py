@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from spinn.util.blocks import Reduce, ReduceTensor
-from spinn.util.blocks import LSTMState, Embed, MLP, Linear, LSTM, EmbedTensor
+from spinn.util.blocks import LSTMState, Embed, MLP, Linear, LSTM, Lift
 from spinn.util.blocks import reverse_tensor
 from spinn.util.blocks import bundle, unbundle, to_cpu, to_gpu, treelstm, lstm
 from spinn.util.blocks import get_h, get_c
@@ -131,16 +131,6 @@ class CSPINN(nn.Module):
 
         # Reduce function for semantic composition.
         self.reduce = ReduceTensor(args.size)
-#        if args.tracker_size is not None:
-#            self.tracker = Tracker(args.size, args.tracker_size, args.lateral_tracking)
-#            if args.transition_weight is not None:
-                # TODO: Might be interesting to try a different network here.
-#                self.predict_use_cell = predict_use_cell
-#                tinp_size = args.tracker_size * 2 if predict_use_cell else args.tracker_size
-#                if self.use_lengths:
-#                    tinp_size += 2
-#                self.transition_net = nn.Linear(tinp_size, 2)
-
         self.choices = np.array([T_SHIFT, T_REDUCE], dtype=np.int32)
 
     def reset_state(self):
@@ -423,32 +413,6 @@ class CSPINN(nn.Module):
 
         # Loss Phase
         # ==========
-
-        if hasattr(self, 'tracker') and hasattr(self, 'transition_net'):
-            t_preds = np.concatenate([m['t_preds'] for m in self.memories if m.get('t_preds', None) is not None])
-            t_given = np.concatenate([m['t_given'] for m in self.memories if m.get('t_given', None) is not None])
-            t_mask = np.concatenate([m['t_mask'] for m in self.memories if m.get('t_mask', None) is not None])
-            t_logits = torch.cat([m['t_logits'] for m in self.memories if m.get('t_logits', None) is not None], 0)
-
-            # We compute accuracy and loss after all transitions have complete,
-            # since examples can have different lengths when not using skips.
-
-            # Transition Accuracy.
-            n = t_mask.shape[0]
-            n_skips = n - t_mask.sum()
-            n_total = n - n_skips
-            n_correct = (t_preds == t_given).sum() - n_skips
-            transition_acc = n_correct / float(n_total)
-
-            # Transition Loss.
-            index = to_gpu(Variable(torch.from_numpy(np.arange(t_mask.shape[0])[t_mask])).long())
-            select_t_given = to_gpu(Variable(torch.from_numpy(t_given[t_mask]), volatile=not self.training).long())
-            select_t_logits = torch.index_select(t_logits, 0, index)
-            transition_loss = nn.NLLLoss()(select_t_logits, select_t_given) * self.transition_weight
-
-            self.n_invalid = (invalid_count > 0).sum()
-            self.invalid = self.n_invalid / float(batch_size)
-
         self.loss_phase_hook()
 
         if self.debug:
@@ -514,9 +478,6 @@ class BaseModel(nn.Module):
         vocab.size = initial_embeddings.shape[0] if initial_embeddings is not None else vocab_size
         vocab.vectors = initial_embeddings
 
-        # Build parsing component.
-        self.spinn = self.build_spinn(args, vocab, predict_use_cell, use_lengths)
-
         # Build classiifer.
         features_dim = self.get_features_dim()
         self.mlp = MLP(features_dim, mlp_dim, num_classes,
@@ -529,14 +490,20 @@ class BaseModel(nn.Module):
         input_dim = args.size
 
         # Create dynamic embedding layer.
-        self.embed = EmbedTensor(input_dim, vocab.size, vectors=vocab.vectors)
+        self.embed = Embed(input_dim, vocab.size, vectors=vocab.vectors, use_projection=False)
 
         # Optionally build input encoder.
         if encode_style is not None:
             self.encode = self.build_input_encoder(encode_style=encode_style,
-                word_embedding_dim=word_embedding_dim, model_dim=model_dim,
+                word_embedding_dim=word_embedding_dim, model_dim=word_embedding_dim,
                 num_layers=encode_num_layers, bidirectional=encode_bidirectional, reverse=encode_reverse,
                 dropout=self.embedding_dropout_rate)
+        
+        # Create Lift layer
+        self.lift = Lift(vocab.vectors.shape[1], input_dim * input_dim)
+
+        # Build parsing component.
+        self.spinn = self.build_spinn(args, vocab, predict_use_cell, use_lengths)
 
     def get_features_dim(self):
         features_dim = (self.hidden_dim * self.hidden_dim * 2) if self.use_sentence_pair else (self.hidden_dim * self.hidden_dim)
@@ -598,6 +565,10 @@ class BaseModel(nn.Module):
             to_encode = torch.cat([e.unsqueeze(0) for e in embeds], 0)
             encoded = self.encode(to_encode)
             embeds = [x.squeeze() for x in torch.chunk(encoded, b, 0)]
+
+        embeds = torch.cat(embeds)
+        embeds = self.lift(embeds)
+        embeds = torch.chunk(to_cpu(embeds), b, 0)
 
         # Make Buffers
         embeds = [torch.chunk(x, l, 0) for x in embeds]
@@ -679,6 +650,12 @@ class BaseModel(nn.Module):
     def wrap_sentence_pair(self, h_list):
         hidden_dim = self.hidden_dim * self.hidden_dim
         batch_size = len(h_list) / 2
-        h_premise = get_h(torch.cat(h_list[:batch_size], 0), hidden_dim)
-        h_hypothesis = get_h(torch.cat(h_list[batch_size:], 0), hidden_dim)
+
+        premise = torch.cat(h_list[:batch_size], 0)
+        hypothesis = torch.cat(h_list[batch_size:], 0)
+
+        # Retrieve layer 2's hidden state
+        h_premise = premise[:, (hidden_dim*3):]
+        h_hypothesis = hypothesis[:, (hidden_dim*3):]
+
         return [h_premise, h_hypothesis]
