@@ -652,30 +652,15 @@ class ReduceTensor(nn.Module):
         # Retrieve hidden state from left_in and feed it into weight matrix
         cell_inp = []
         hidden_dim = self.dim * self.dim
-        for x in left_in:
-            h = x[:, hidden_dim:]
-            h = h.view(self.dim, self.dim)
-            cell_inp.append(torch.addmm(self.b1, self.weight, h))
 
-        cell_inp = torch.stack(cell_inp)
-        cell_inp = F.tanh(cell_inp)
+        h = left.h.contiguous().view(-1, self.dim, self.dim)
+        cell_inp = torch.matmul(self.weight, h)
+        cell_inp = F.tanh(torch.add(cell_inp, self.b1))
 
         # Retrieve hidden state from right_in
-        tmp = []
-        for x in right_in:
-            h = x[:, hidden_dim:]
-            h = h.view(self.dim, self.dim)
-            tmp.append(h)
-        
-        tmp = torch.stack(tmp)
-
-        cell_inp = torch.bmm(cell_inp, tmp)
-        cell_inp = torch.chunk(cell_inp, len(left_in), 0)
-        cell_inp = [torch.squeeze(x) + self.b2 for x in cell_inp]
-        cell_inp = [x.view(1, -1) for x in cell_inp]
-        cell_inp = torch.stack(cell_inp)
+        h = right.h.contiguous().view(-1, self.dim, self.dim)
+        cell_inp = F.tanh(torch.baddbmm(self.b2, cell_inp, h))
         cell_inp = cell_inp.view(-1, hidden_dim)
-        cell_inp = F.tanh(cell_inp)
 
         out = unbundle(treelstmtensor(left.c, right.c, lstm_gates, cell_inp, training=self.training))
 
